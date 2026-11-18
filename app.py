@@ -1,26 +1,21 @@
-# VinciCAD V2 - Full General CAD + AI
+# VinciCAD V2 - Full General CAD + AI - UPDATED
 # Author: Josiah Ehi - VinciCAD
 # Features: SOLIDWORKS style + FreeCAD style + Proteus style + VINCI AI (FRIDAY)
-# Works on Streamlit Cloud with LIGHT requirements - no build123d needed
+# UPDATED: No Tavily, No Hugging Face. Only Groq key needed.
+# Research = DuckDuckGo + Wikipedia (Free) | Image = Pollinations (Free, No Key)
 
 import streamlit as st
 import math
 import io
-import base64
+import urllib.parse
 import numpy as np
 
-# ---------- OPTIONAL AI LIBS - App go still work if dem no dey ----------
+# ---------- OPTIONAL AI LIBS ----------
 try:
     from groq import Groq
     HAS_GROQ = True
 except:
     HAS_GROQ = False
-
-try:
-    from tavily import TavilyClient
-    HAS_TAVILY = True
-except:
-    HAS_TAVILY = False
 
 try:
     import requests
@@ -36,7 +31,7 @@ except:
 
 st.set_page_config(page_title="VinciCAD V2 - Free CAD + AI", page_icon="⚙️", layout="wide")
 
-# ---------- SESSION STATE - So AI fit control app ----------
+# ---------- SESSION STATE ----------
 if "teeth" not in st.session_state: st.session_state.teeth = 24
 if "diameter" not in st.session_state: st.session_state.diameter = 50
 if "thickness" not in st.session_state: st.session_state.thickness = 8
@@ -50,7 +45,7 @@ if "vin" not in st.session_state: st.session_state.vin = 12
 if "vout" not in st.session_state: st.session_state.vout = 5.0
 if "generated_image_prompt" not in st.session_state: st.session_state.generated_image_prompt = ""
 
-# ---------- SECRETS - Safe, no hard-code keys ----------
+# ---------- SECRETS - ONLY GROQ NOW ----------
 def get_secret(name):
     try:
         return st.secrets[name]
@@ -58,8 +53,37 @@ def get_secret(name):
         return None
 
 GROQ_KEY = get_secret("GROQ_API_KEY")
-TAVILY_KEY = get_secret("TAVILY_API_KEY")
-HF_TOKEN = get_secret("HF_TOKEN")
+
+# ---------- FREE RESEARCH FUNCTION - EDITED, NO TAVILY ----------
+# Uses DuckDuckGo (no key) + Wikipedia (no key) + Groq to summarize
+def free_research(query):
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": 1},
+            timeout=10
+        ).json()
+        ddg_text = r.get("AbstractText", "")
+        if not ddg_text and r.get("RelatedTopics"):
+            first = r["RelatedTopics"][0]
+            if isinstance(first, dict):
+                ddg_text = first.get("Text", "")
+    except:
+        ddg_text = ""
+
+    try:
+        wiki = requests.get(
+            f"https://en.wikipedia.org/api/rest_v1/page/summary/{query.replace(' ', '_')}",
+            timeout=10
+        ).json()
+        wiki_text = wiki.get("extract", "")
+    except:
+        wiki_text = ""
+
+    combined = f"DuckDuckGo: {ddg_text}\nWikipedia: {wiki_text}"
+    if combined.strip() == "DuckDuckGo: \nWikipedia:":
+        combined = "No direct DuckDuckGo/Wikipedia result. Groq will answer from its knowledge."
+    return combined
 
 # ---------- HEADER ----------
 st.markdown("# ⚙️ VinciCAD V2")
@@ -68,21 +92,13 @@ st.divider()
 
 # ---------- SIDEBAR ----------
 st.sidebar.header("🛠️ VinciCAD Studio")
-mode = st.sidebar.selectbox("Design Mode", [
-    "Gear - Parametric",
-    "Box / Enclosure",
-    "Cylinder / Shaft",
-    "Plate with Holes",
-    "Buck Converter Board - Proteus Style",
-    "Assembly - 2 Gears Meshing",
-    "PCB View - Buck Converter"
-], index=["Gear - Parametric","Box / Enclosure","Cylinder / Shaft","Plate with Holes","Buck Converter Board - Proteus Style","Assembly - 2 Gears Meshing","PCB View - Buck Converter"].index(st.session_state.mode) if st.session_state.mode in ["Gear - Parametric","Box / Enclosure","Cylinder / Shaft","Plate with Holes","Buck Converter Board - Proteus Style","Assembly - 2 Gears Meshing","PCB View - Buck Converter"] else 0)
+all_modes = ["Gear - Parametric","Box / Enclosure","Cylinder / Shaft","Plate with Holes","Buck Converter Board - Proteus Style","Assembly - 2 Gears Meshing","PCB View - Buck Converter"]
+mode = st.sidebar.selectbox("Design Mode", all_modes, index=all_modes.index(st.session_state.mode) if st.session_state.mode in all_modes else 0)
 st.session_state.mode = mode
 
 st.sidebar.divider()
 st.sidebar.subheader("Dimensions (mm)")
 
-# Variables with defaults
 teeth = st.session_state.teeth
 diameter = st.session_state.diameter
 thickness = st.session_state.thickness
@@ -93,6 +109,8 @@ holes = 4
 vin = st.session_state.vin
 vout = st.session_state.vout
 module = 2.0
+teeth2 = 24
+diameter2 = 80
 
 if mode == "Gear - Parametric":
     teeth = st.sidebar.slider("Number of Teeth (N)", 8, 60, st.session_state.teeth, key="teeth_slider")
@@ -144,7 +162,6 @@ elif mode == "Assembly - 2 Gears Meshing":
     thickness = st.sidebar.slider("Thickness (mm)", 3, 15, 8)
     st.sidebar.info(f"Gear 2 Diameter: {diameter2:.1f}mm | Ratio: 1 : {teeth2/teeth:.2f} | Center Distance: {(diameter+diameter2)/2:.1f}mm")
 
-# Boolean - SOLIDWORKS style
 st.sidebar.divider()
 operation = st.sidebar.selectbox("Boolean Operation", ["Single Part", "Union - Add Second Part", "Cut - Subtract Hole", "Difference"])
 color_choice = st.sidebar.color_picker("Part Color", "#FF3B30")
@@ -158,18 +175,14 @@ col1, col2 = st.columns([1.2, 1])
 with col1:
     st.subheader("3D Preview / 2D Blueprint Preview")
     volume = 0
-    # --- Calculations ---
     if mode == "Gear - Parametric":
         volume = math.pi * (diameter/2)**2 * thickness - math.pi * (hole_dia/2)**2 * thickness
-        # 2D Gear preview with chart
         angles = np.linspace(0, 2*np.pi, teeth*2+1)
         radii = np.array([diameter/2 if i % 2 == 0 else diameter/2 - module*0.8 for i in range(teeth*2+1)])
         chart_data = {"x": radii * np.cos(angles), "y": radii * np.sin(angles)}
         st.line_chart(chart_data)
-        st.caption(f"Gear Preview: {teeth} teeth, Module {module:.2f}, Outer Dia {diameter}mm. Top view - Tooth profile simplified for preview. Real involute in V3.")
+        st.caption(f"Gear Preview: {teeth} teeth, Module {module:.2f}, Outer Dia {diameter}mm. Top view - Tooth profile simplified for preview.")
     elif mode == "Assembly - 2 Gears Meshing":
-        # Two gears chart
-        import pandas as pd
         angles = np.linspace(0, 2*np.pi, 100)
         st.line_chart({"Gear1_X": np.cos(angles)*diameter/2, "Gear2_X": np.cos(angles)*diameter2/2 + (diameter+diameter2)/2})
         st.success(f"Assembly: Gear1 {teeth}T turns 2x -> Gear2 {teeth2}T turns 1x. Meshing OK, center distance {(diameter+diameter2)/2:.1f}mm")
@@ -181,7 +194,7 @@ with col1:
         st.info("PCB View: Top layer - Red traces, Bottom layer - Blue GND plane. Components: XL4015 (SO-8), Inductor (SMD), 2x Capacitors, USB-A Port, Terminal Block.")
         volume = length * width * thickness
     else:
-        st.bar_chart({"Length": [length if 'length' in locals() else diameter], "Width": [width if 'width' in locals() else diameter], "Thickness": [thickness]})
+        st.bar_chart({"Length": [length], "Width": [width], "Thickness": [thickness]})
         if mode == "Box / Enclosure":
             volume = length*width*thickness
         elif mode == "Cylinder / Shaft":
@@ -191,14 +204,13 @@ with col1:
 
     st.write(f"**Boolean:** {operation} | **Color:** {color_choice}")
     if operation != "Single Part":
-        st.info(f"Boolean {operation} applied. In full CAD kernel, second part would be merged/cut. For this web version, volume adjusted by 10% for demo.")
+        st.info(f"Boolean {operation} applied. For this web version, volume adjusted for demo.")
         if operation == "Cut - Subtract Hole":
             volume = volume * 0.9
         elif operation == "Union - Add Second Part":
             volume = volume * 1.15
 
-    # Downloads
-    stl_content = f"solid VinciCAD\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex {length if 'length' in locals() else diameter} 0 0\n      vertex 0 {width if 'width' in locals() else diameter} 0\n    endloop\n  endfacet\nendsolid VinciCAD\n"
+    stl_content = f"solid VinciCAD\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex {length} 0 0\n      vertex 0 {width} 0\n    endloop\n  endfacet\nendsolid VinciCAD\n"
     st.download_button("⬇️ Download STL - For 3D Printing / Blender", data=stl_content.encode(), file_name="VinciCAD_Part.stl", mime="model/stl")
     dxf_content = f"""0
 SECTION
@@ -221,9 +233,9 @@ LINE
 20
 0.0
 11
-{length if 'length' in locals() else diameter}
+{length}
 21
-{width if 'width' in locals() else 0}
+{width}
 0
 CIRCLE
 10
@@ -231,7 +243,7 @@ CIRCLE
 20
 0.0
 40
-{diameter/2 if 'diameter' in locals() else 25}
+{diameter/2}
 0
 ENDSEC
 0
@@ -279,7 +291,7 @@ with col2:
             st.code(f"Gear Blueprint:\nOuter Dia: {diameter}mm\nHole: {hole_dia}mm\nThickness: {thickness}mm\nTeeth: {teeth}\nModule: {module:.2f}\nAddendum: {module:.2f}mm\nTolerance: +/- 0.2mm\nScale 1:1 - All dimensions in mm", language="text")
         elif mode == "Assembly - 2 Gears Meshing":
             st.code(f"Assembly Blueprint:\nGear1: {teeth}T, {diameter}mm\nGear2: {teeth2}T, {diameter2:.1f}mm\nCenter Distance: {(diameter+diameter2)/2:.1f}mm\nMeshing: Involute, Backlash 0.1mm", language="text")
-        elif 'length' in locals():
+        else:
             st.code(f"Part Blueprint:\nLength: {length}mm\nWidth: {width}mm\nThickness: {thickness}mm\nTolerance: +/- 0.2mm\nMaterial: PLA / FR4 for PCB", language="text")
 
 # ---------- VINCI AI - FRIDAY - FULL ----------
@@ -287,13 +299,11 @@ if show_ai:
     st.divider()
     st.header("🤖 V.I.N.C.I. - Your FRIDAY AI | Chat + Voice + Research + Image")
     st.caption("Vocal Intelligent Neural CAD Interface. E get full access to VinciCAD. Talk am, e go do am.")
-    # Status
     c1, c2, c3 = st.columns(3)
     with c1: st.success("Groq AI: " + ("Connected" if GROQ_KEY else "Need Key - Add in Secrets"))
-    with c2: st.success("Tavily Research: " + ("Connected" if TAVILY_KEY else "Need Key - Add in Secrets"))
-    with c3: st.success("HF Image: " + ("Connected" if HF_TOKEN else "Need Key - Add in Secrets"))
+    with c2: st.success("Research: Free - DuckDuckGo + Wikipedia - No Key Needed")
+    with c3: st.success("Image: Free - Pollinations - No Key Needed")
 
-    # Tabs for AI
     tab_chat, tab_research, tab_image, tab_voice = st.tabs(["💬 Chat + Control", "🔍 Deep Research", "🎨 Image Generation", "🎤 Voice"])
 
     with tab_chat:
@@ -305,11 +315,9 @@ if show_ai:
             st.session_state.messages.append({"role": "user", "content": user_input})
             reply = ""
             low = user_input.lower()
-            # --- TOOL CALLING - Local brain if Groq no dey, Groq brain if key dey ---
             if GROQ_KEY and HAS_GROQ:
                 try:
                     client = Groq(api_key=GROQ_KEY)
-                    # AI decides tool + we parse it locally for safety
                     chat = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
                         messages=[{"role": "system", "content": "You are V.I.N.C.I., FRIDAY for VinciCAD. User is Josiah, 17, EEE student in Nigeria. You control VinciCAD. If user asks gear, buck, research, image, explain in simple English + small Pidgin. Be helpful, short. If user says make gear with numbers, repeat the numbers clearly like 'TEETH:32 DIAMETER:60'. "}, {"role": "user", "content": user_input}],
@@ -319,16 +327,14 @@ if show_ai:
                 except Exception as e:
                     reply = f"Groq error: {e}. Using local brain."
             if not reply:
-                # Local brain fallback - always works
                 import re
                 nums = re.findall(r"\d+", user_input)
                 if "gear" in low or "teeth" in low:
-                    # Try extract teeth and diameter
                     if len(nums) >= 2:
                         try:
                             nt = int(nums[0]); nd = int(nums[1])
                             st.session_state.teeth = nt; st.session_state.diameter = nd; st.session_state.mode = "Gear - Parametric"
-                            reply = f"Done boss. I don set gear to {nt} teeth, {nd}mm diameter, Module {nd/nt:.2f}mm. I don rebuild am for you. Want me to export STL? The sidebar go update when you refresh."
+                            reply = f"Done boss. I don set gear to {nt} teeth, {nd}mm diameter, Module {nd/nt:.2f}mm. I don rebuild am for you. Want me to export STL?"
                         except:
                             reply = "Done boss, gear updated."
                     elif len(nums) == 1:
@@ -349,9 +355,9 @@ if show_ai:
                     st.session_state.mode = "Plate with Holes"
                     reply = "Plate mode on."
                 elif "research" in low:
-                    reply = "Deep research - go to Research tab and type your topic, I go search web with Tavily and give summary with sources."
+                    reply = "Deep research - go to Research tab and type your topic, I go search web with DuckDuckGo + Wikipedia and give summary."
                 elif "image" in low or "generate" in low:
-                    reply = "Image - go to Image Generation tab, type prompt, I go generate with Hugging Face FLUX."
+                    reply = "Image - go to Image Generation tab, type prompt, I go generate with Pollinations, no key needed."
                 elif "export" in low or "stl" in low:
                     reply = "STL ready. Scroll up, click 'Download STL' button. E go download for 3D printing / Blender."
                 else:
@@ -359,54 +365,44 @@ if show_ai:
             st.session_state.messages.append({"role": "assistant", "content": reply})
             st.rerun()
 
+    # ---------- RESEARCH TAB - EDITED, NO TAVILY ----------
     with tab_research:
-        st.subheader("🔍 Deep Research - Tavily + Groq")
+        st.subheader("🔍 Deep Research - Free, No Key Needed")
+        st.caption("Uses DuckDuckGo + Wikipedia, then Groq summarizes for you.")
         q = st.text_input("Research topic", value="Best inductor for 12V to 5V buck converter for phone charging", key="research_q")
         if st.button("Run Deep Research", key="research_btn"):
-            if TAVILY_KEY and HAS_TAVILY:
+            with st.spinner("Searching DuckDuckGo + Wikipedia..."):
+                info = free_research(q)
+            st.write("**Raw info found:**")
+            st.write(info)
+            if GROQ_KEY and HAS_GROQ:
                 try:
-                    tav = TavilyClient(api_key=TAVILY_KEY)
-                    res = tav.search(query=q, max_results=5, search_depth="advanced")
-                    st.write("**Sources found:**")
-                    for r in res.get("results", [])[:5]:
-                        st.write(f"- [{r.get('title')}]({r.get('url')}) - {r.get('content')[:200]}...")
-                    # Summarize with Groq
-                    if GROQ_KEY and HAS_GROQ:
-                        client = Groq(api_key=GROQ_KEY)
-                        summ = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": f"Summarize this research for a 17 year old EEE student in simple English, with bullet points, for topic: {q}. Sources: {str(res)[:3000]}"}], temperature=0.4, max_tokens=600)
-                        st.markdown("**VINCI Summary:**")
-                        st.write(summ.choices[0].message.content)
-                    else:
-                        st.info("Add Groq key to get AI summary. Sources above are raw Tavily results.")
+                    client = Groq(api_key=GROQ_KEY)
+                    summ = client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content": f"Summarize for 17yr EEE student in simple English, bullet points. Topic: {q}. Info: {info}"}],
+                        temperature=0.4, max_tokens=600
+                    )
+                    st.markdown("**VINCI Summary:**")
+                    st.write(summ.choices[0].message.content)
                 except Exception as e:
-                    st.error(f"Research error: {e}. Check Tavily key in Secrets.")
+                    st.error(f"Groq summary error: {e}")
             else:
-                st.warning("Add TAVILY_API_KEY in Streamlit Secrets to enable real research. Demo summary: For 12V to 5V buck, best is XL4015 with 33uH, 3A inductor, 470uF capacitor. LM2596 is best for learning because e dey cheap and e no need many parts. Sources: TI Datasheet, XLSEMI Datasheet.")
-                st.write("- XL4015 Datasheet - 5A, 180kHz")
-                st.write("- LM2596 Datasheet - 3A, 150kHz")
-                st.write("- TI Buck Converter Design Guide")
+                st.warning("Add GROQ_API_KEY for AI summary. Raw info above still works without am.")
 
+    # ---------- IMAGE TAB - EDITED, NO HUGGING FACE ----------
     with tab_image:
-        st.subheader("🎨 Image Generation - Hugging Face FLUX")
+        st.subheader("🎨 Image Generation - Free, No Key, No Signup")
+        st.caption("Uses Pollinations.ai - Just type prompt, image go come.")
         prompt = st.text_input("Image prompt", value="Futuristic mechanical gear, steampunk, metallic, studio lighting, for engineering presentation", key="img_prompt")
         if st.button("Generate Image", key="img_btn"):
             st.session_state.generated_image_prompt = prompt
-            if HF_TOKEN and HAS_REQUESTS:
-                try:
-                    with st.spinner("Generating image with FLUX... e fit take 20-30 secs for free tier..."):
-                        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-                        resp = requests.post("https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell", headers=headers, json={"inputs": prompt}, timeout=90)
-                        if resp.status_code == 200:
-                            st.image(resp.content, caption=f"Generated: {prompt}", use_column_width=True)
-                            st.success("Image generated! Right-click to save for your report.")
-                        else:
-                            st.warning(f"HF model dey loading or busy: {resp.status_code}. Try again in 30 secs. Free tier dey sleep sometimes. Demo: Use prompt for your presentation cover.")
-                            st.info(f"Prompt saved: {prompt}. Try again - FLUX go wake up.")
-                except Exception as e:
-                    st.error(f"Image error: {e}")
-            else:
-                st.warning("Add HF_TOKEN in Secrets to generate real image. For now, use this prompt for your cover: 'VinciCAD logo, gear + Da Vinci style, blue and orange, futuristic'")
-                st.info(f"Your prompt: {prompt}")
+            safe_prompt = urllib.parse.quote(prompt)
+            image_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024&seed=42&model=flux&nologo=true"
+            with st.spinner("Generating image..."):
+                st.image(image_url, caption=f"Generated: {prompt}", use_column_width=True)
+            st.success("Image generated! Right-click to save for your report.")
+            st.write(f"Direct link: {image_url}")
 
     with tab_voice:
         st.subheader("🎤 Voice - Talk to VINCI")
@@ -417,19 +413,17 @@ if show_ai:
             if GROQ_KEY and HAS_GROQ:
                 try:
                     client = Groq(api_key=GROQ_KEY)
-                    # Save temp
                     with open("/tmp/vinci_voice.wav", "wb") as f:
                         f.write(audio.getvalue())
                     with open("/tmp/vinci_voice.wav", "rb") as f:
                         trans = client.audio.transcriptions.create(file=( "voice.wav", f.read()), model="whisper-large-v3", response_format="text")
                     text = str(trans)
                     st.success(f"VINCI heard you: '{text}'")
-                    st.info("Copy that text, paste am for Chat tab, VINCI go execute am. Full auto-execution dey for V3.")
+                    st.info("Copy that text, paste am for Chat tab, VINCI go execute am.")
                 except Exception as e:
                     st.error(f"Voice error: {e}. Check Groq key. Whisper needs Groq key.")
             else:
                 st.warning("Add GROQ_API_KEY to enable Whisper voice-to-text.")
-            # TTS Reply
             if HAS_GTTS:
                 if st.button("🔊 Make VINCI Speak Reply", key="tts_btn"):
                     try:
